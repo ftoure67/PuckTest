@@ -1,12 +1,464 @@
 <html>
  <head>
  </head>
- <body>
+ <body onload="drawGrid()">
   <script src="https://www.puck-js.com/puck.js"></script>
   <button onclick="Puck.write('D16.write(1);\n');">Green On!</button>
   <button onclick="Puck.write('D16.write(0);\n');">Green Off!</button>
   <button onclick="Puck.write('D15.write(1);\n');">Red On!</button>
   <button onclick="Puck.write('D15.write(0);\n');">Red Off!</button></br>
-  <button onclick="Puck.eval('oosb.pixels()',function(x) { console.log(x); })">Pixels</button></br> 
+  <button id="pixels" onclick="connect();">Connect</button>
+  <button id="oneFrame" onclick="oneFrame();">One Frame</button>
+  <button id="continuous" onclick="continuous();">Start</button></br>
+  <input type="checkbox" id="debugTrace" name="debugTrace">
+  <label for="debugTrace">Debug</label></br>
+  Min: <label id="min">0.0</label> Avg: <label id="avg">0.0</label> Max: <label id="max">0.0</label></br></br>
+
+  <canvas id="cnv" width="512" height="512"></canvas>
+
+  <script type="text/javascript">
+    // Get the actual curve inside the SVG. You could make differemt
+    // parts of a more complex SVG do different things...
+
+	var SIZE = 8;
+	var IMAGE_SIZES = [SIZE, 15, 29, 57, 113, 225];
+	var MIN_PIXELS  = [0, 4,  8,  16, 32,  64];
+	var NUMBER_INTERPOLATION = 4;
+	var min = 65555.0;
+	var max = 0;
+	var ave = 0;
+	var interpolatedBitmap;
+	var theBitmap;
+
+	var temp = [24.5, 24.75, 24.5, 24.5, 24.75, 25.25, 26.25, 24.75,
+                24.5, 23.75, 24 , 24, 24.25, 26.5, 27.5, 25.5, 24.5,
+                25.0, 24.5, 24, 25, 27.25, 26.75, 25, 25.75, 27.25, 26.5,
+                25.0, 25.75, 27, 25.25, 24.5, 26.25, 26.5, 26.75, 25.25,
+                24.5, 25, 25, 24.75, 24.5, 24.75, 25, 24.5, 24.5, 24.75,
+                24.5, 25, 24.5, 24.5, 24.5, 24.75, 24.75, 25, 24.75,
+                25.25, 24.25, 24.5, 24.25, 24.5, 24.5, 24.5, 25, 25.25];
+				
+	function getGradientColor(colorFrom, colorTo, percentage) {
+        if (percentage >= 0 && percentage <= 1)
+			return {r: from.r + Int(CGFloat(colorTo.r - colorFrom.r) * percentage),
+						 g: colorFrom.g + Int(CGFloat(colorTo.g - colorFrom.g) * percentage),
+						 b: colorFrom.b + Int(CGFloat(colorTo.b - colorFrom.b) * percentage)};
+    }
+	
+	function parseHexString(str) { 
+		var result = [];
+		while (str.length >= 2) { 
+			result.push(parseInt(str.substring(0, 2), 16));
+			str = str.substring(2, str.length);
+		}
+
+		return result;
+	}
+
+	function signed_12bit_to_float(val) {
+		// take first 11 bits as absolute val
+		abs_val = (val & 0x7FF);
+		if (val & 0x800)
+			return 0.0 - abs_val;
+		return abs_val;
+	}
+
+	function twos_comp_to_float(val) {
+		val &= 0xfff;
+		if (val & 0x800)
+			val -= 0x1000;
+		return val;
+	}
+
+	function matrix(rows, cols, defaultValue) {
+		var arr = [];
+		// Creates all lines:
+		for (var i=0; i < rows; i++){
+			// Creates an empty line
+			arr.push([]);
+			// Adds cols to the empty line:
+			arr[i].push( new Array(cols));
+
+		    for (var j=0; j < cols; j++){
+				// Initializes:
+				arr[i][j] = defaultValue;
+			}
+		}
+		return arr;
+	}
+
+	const PIXEL_TEMP_CONVERSION = 0.25;
+	
+	function fillBitmap(temp) {
+		theBitmap = matrix(8, 8, 0.0);
+		for (var i=0; i<8; i++) {
+			for (var j=0; j < 8; j++) {
+				theBitmap[i][j] = temp[i * 8 + j];
+			}
+		}
+	}
+
+	function fillRawBitmap(rawData) {
+		theBitmap = matrix(8, 8, 0.0);
+		for (var i=0; i<8; i++) {
+			for (var j=0; j < 8; j++) {
+			    var col = i * SIZE + j;
+				var index = col << 1;
+				raw = (rawData[index + 1] << 8) | (rawData[index]);
+				theBitmap[i][j] = twos_comp_to_float(raw) * PIXEL_TEMP_CONVERSION;
+			}
+		}
+	}
+
+	function computeAverage() {
+		ave = 0;
+		min = 65555.0;
+		max = 0;
+		for (var i = 0; i < SIZE; i++) {
+			for (var j = 0; j < SIZE; j++) {
+				ave += theBitmap[i][j];
+				if (theBitmap[i][j] < min) {
+					min = theBitmap[i][j];
+				}
+				if (theBitmap[i][j] > max) {
+					max = theBitmap[i][j];
+				}
+			}
+		}
+		
+		ave /= (SIZE * SIZE);
+	}
+
+	function linearInterpolate() {
+		var interpolatedSize = IMAGE_SIZES[NUMBER_INTERPOLATION];
+		
+		for (var x = 0; x <SIZE; x++) {
+			for (var y = 0; y < SIZE; y++) {
+				interpolatedBitmap[x][y] = theBitmap[x][y];
+			}
+		}
+		
+		for (var inter = 1; inter <= NUMBER_INTERPOLATION; inter++) {
+			linearInterpolation(inter);
+		}
+	}
+	
+	function linearInterpolation(factor) {
+		var size = IMAGE_SIZES[factor - 1];
+		var interpolatedSize = IMAGE_SIZES[factor];
+
+		copy = matrix(interpolatedSize, interpolatedSize, 0.0);
+		for (var x = 0; x < size; x++) {
+			for (var y = 0; y < size; y++) {
+				copy[x*2][y*2] = interpolatedBitmap[x][y];
+			}
+		}
+		
+		for (var x= 0; x < interpolatedSize; x++) {
+			for (var y = 0; y < interpolatedSize; y++) {
+				interpolatedBitmap[x][y] = copy[x][y];
+			}
+		}
+		copy = null;
+		
+		for (var x = 0; x < size; x++) {
+			for (var y = 0; y < size; y++) {
+				if (y < size - 1) {
+					interpolatedBitmap[x*2][y*2 + 1] = (interpolatedBitmap[x * 2][y * 2] + interpolatedBitmap[x*2][(y+1)*2]) / 2;
+				}
+			}
+		}
+
+		for (var y = 0; y < interpolatedSize; y++) {
+			for (var x = 0; x < size - 1; x++) {
+				interpolatedBitmap[x*2 +1][y] = (interpolatedBitmap[x * 2][y] + interpolatedBitmap[(x + 1) *2][y]) / 2;
+			}
+		}		
+	}
+	
+	function drawRect(ctx, x, y, sizex, sizey, color) {
+		ctx.fillStyle = color;
+		ctx.fillRect(x, y, sizex, sizey);
+	}
+
+	function map(value, start1, stop1, start2, stop2) {
+		var outgoing = start2 + (stop2 - start2) * ((value - start1) / (stop1 - start1));
+		return outgoing;
+	}
+	
+	function drawTemp(temp) {
+		var size = IMAGE_SIZES[NUMBER_INTERPOLATION];
+		var scale = theScale / (1 << NUMBER_INTERPOLATION);
+		var cnv = document.getElementById("cnv");
+		var limit = ave;
+		var theScale = 64;
+		var scale = theScale / (1 << NUMBER_INTERPOLATION);
+
+		var ctx = cnv.getContext('2d');
+		ctx.beginPath();
+
+		for (var i = 0; i < size; i++) {
+			for (var j = 0; j < size; j++) {
+				var temp = 0;
+				try {
+					temp = interpolatedBitmap[i][j];
+				} catch(err) {
+					console.log("Error");
+				}
+				
+				var r = 0;
+				var b = 0;
+				var g = 0;
+
+				g = Math.floor(map(temp, min, max, 0, 120));
+
+				if (temp > limit) {
+					r = Math.floor(map(temp, min, max, 0, 255));
+				} else if (temp < limit) {
+					b = Math.floor(map(temp, min, max, 0, 255));
+				}
+
+				var myColor = "rgb(" + r + "," + g + "," + b + ")";
+				//myColor = tempToRgb(temp);
+				drawRect(ctx, i * scale, j * scale, scale, scale, myColor);
+			}
+		}
+		ctx.closePath();
+	}
+
+	function drawGrid() {
+		var cnv = document.getElementById("cnv");
+
+		var gridOptions = {
+			minorLines: {
+				separation: 64,
+				color: '#0000FF'
+			},
+			majorLines: {
+				separation: 100,
+				color: '#FF0000'
+			}
+		};
+
+		var interpolatedSize = IMAGE_SIZES[NUMBER_INTERPOLATION];
+		interpolatedBitmap = matrix(interpolatedSize, interpolatedSize, 0.0);
+
+		fillBitmap(temp);
+		computeAverage();
+		linearInterpolate();
+		//drawGridLines(cnv, gridOptions.minorLines);
+		//drawGridLines(cnv, gridOptions.majorLines);
+
+		//drawRect(cnv, 0, 0, 10, 10);
+		//drawRect(cnv, 20, 0, 10, 10);
+		//drawRect(cnv, 40, 0, 10, 10);
+		drawTemp(temp);
+		return;
+	}
+
+    // Called when we get a line of data - updates the light color
+    function onLine(v) {
+	    var debugTrace = document.getElementById('debugTrace');
+		if (debugTrace.checked) console.log("Received: "+v);
+		const indexOfFirst = v.indexOf("TH=");
+		if (indexOfFirst >= 0) {
+			var thermal = v.substr(indexOfFirst + 3);
+			var minLabel = document.getElementById('min');
+			var maxLabel = document.getElementById('max');
+			var avgLabel = document.getElementById('avg');
+			raw = parseHexString(thermal);
+			fillRawBitmap(raw);
+			computeAverage();
+			minLabel.innerHTML = min;
+			maxLabel.innerHTML = max;
+			avgLabel.innerHTML = ave;
+			linearInterpolate();
+			drawTemp();
+		}
+    }
+
+    // When clicked, connect or disconnect
+    var connection;
+    function connect() {
+		if (connection) {
+			connection.close();
+			connection = undefined;
+		}
+		Puck.connect(function(c) {
+			if (!c) {
+				alert("Couldn't connect!");
+				return;
+			}
+			connection = c;
+			// Handle the data we get back, and call 'onLine'
+			// whenever we get a line
+			var buf = "";
+			connection.on("data", function(d) {
+				buf += d;
+				var i = buf.indexOf("\n");
+				while (i>=0) {
+					onLine(buf.substr(0,i));
+					buf = buf.substr(i+1);
+					i = buf.indexOf("\n");
+				}
+			});
+		
+			// First, reset Puck.js
+			connection.write("clearInterval();i2c=new I2C();i2c.setup({sda:D21, scl:D22});", function() {;});
+			/*connection.write("", function() {
+				// Wait for it to reset itself
+				setTimeout(function() {
+					// Now tell it to write data on the current light level to Bluetooth
+					// 10 times a second. Also ensure that when disconnected, Puck.js
+					// resets so the setInterval doesn't keep draining battery.
+					connection.write("clearInterval();setInterval(function(){print('thermal=' + oosb.pixelArray());},1000);\n",
+						function() {;});
+				}, 1500);
+			});*/
+		});
+	}
+	
+	function oneFrame() {
+		if (connection) {
+			connection.write("clearInterval();print(oosb.pixelArray());\n", function() {;});
+		} else {
+			alert("Connect first");
+		}
+	}
+	
+	var continuousStop = false;
+	
+	function continuous() {
+		var cont = document.getElementById("continuous");
+		continuousStop = !continuousStop;
+		console.log("ContinuousStop = " + continuousStop);
+		if (continuousStop)
+			cont.innerHTML = "Stop";
+		else
+			cont.innerHTML = "Start";
+		if (connection) {
+			if (!continuousStop)
+				connection.write("clearInterval();\n", function() {;});
+			else
+				connection.write("clearInterval();setInterval(function(){print(oosb.pixelArray());},200);\n", function() {;});
+		} else {
+			alert("Connect first");
+		}
+	}
+
+	function drawGridLines(cnv, lineOptions) {
+		var iWidth = cnv.width;
+		var iHeight = cnv.height;
+
+		var ctx = cnv.getContext('2d');
+
+		ctx.strokeStyle = lineOptions.color;
+		ctx.strokeWidth = 1;
+
+		ctx.beginPath();
+
+		var iCount = null;
+		var i = null;
+		var x = null;
+		var y = null;
+
+		iCount = Math.floor(iWidth / lineOptions.separation);
+
+		for (i = 0; i <= iCount; i++) {
+			x = (i * lineOptions.separation);
+			ctx.moveTo(x, 0);
+			ctx.lineTo(x, iHeight);
+			ctx.stroke();
+		}
+
+		iCount = Math.floor(iHeight / lineOptions.separation);
+
+		for (i = 0; i <= iCount; i++) {
+			y = (i * lineOptions.separation);
+			ctx.moveTo(0, y);
+			ctx.lineTo(iWidth, y);
+			ctx.stroke();
+		}
+
+		ctx.closePath();
+
+		return;
+	}
+
+	function get_point(p, rows, cols, x, y) {
+		if (x < 0)
+			x = 0;
+		if (y < 0)
+			y = 0;
+		if (x >= cols)
+			x = cols - 1;
+		if (y >= rows)
+			y = rows - 1;
+		return p[y * cols + x];
+	}
+
+	function set_point(p, rows, cols, x, y, f) {
+		if ((x < 0) || (x >= cols))
+			return;
+		if ((y < 0) || (y >= rows))
+			return;
+		p[y * cols + x] = f;
+	}
+
+	// p is a list of 4 points, 2 to the left, 2 to the right
+	function cubicInterpolate(p, x) {
+		return p[1] + (0.5 * x * (p[2] - p[0] + x*(2.0*p[0] - 5.0*p[1] + 4.0*p[2] - p[3] + x*(3.0*(p[1] - p[2]) + p[3] - p[0]))));
+	}
+
+	// p is a 16-point 4x4 array of the 2 rows & columns left/right/above/below
+	function bicubicInterpolate(p, x, y) {
+		var arr = [0,0,0,0];
+		arr[0] = cubicInterpolate(p[0], x);
+		arr[1] = cubicInterpolate(p[4], x);
+		arr[2] = cubicInterpolate(p[8], x);
+		arr[3] = cubicInterpolate(p[12], x);
+		return cubicInterpolate(arr, y);
+	}
+
+	// src is rows*cols and dest is a 4-point array passed in already allocated!
+	function get_adjacents_1d(src, dest, rows, cols, x, y) {
+		// pick two items to the left
+		dest[0] = get_point(src, rows, cols, x-1, y);
+		dest[1] = get_point(src, rows, cols, x, y);
+		// pick two items to the right
+		dest[2] = get_point(src, rows, cols, x+1, y);
+		dest[3] = get_point(src, rows, cols, x+2, y);
+	}
+
+	// src is rows*cols and dest is a 16-point array passed in already allocated!
+	function get_adjacents_2d(src, dest, rows, cols, x, y) {
+		for (var delta_y = -1; delta_y < 3; delta_y++) { // -1, 0, 1, 2
+			index = 4 * (delta_y+1); // index into each chunk of 4
+			for (var delta_x = -1; delta_x < 3; delta_x++) { // -1, 0, 1, 2
+					dest[delta_x+1 + index] = get_point(src, rows, cols, x+delta_x, y+delta_y);
+			}
+		}
+	}
+	
+	// src is a grid src_rows * src_cols
+	// dest is a pre-allocated grid, dest_rows*dest_cols
+	function interpolate_image(src, src_rows, src_cols, dest, dest_rows, dest_cols) {
+		mu_x = (src_cols - 1.0) / (dest_cols - 1.0);
+		mu_y = (src_rows - 1.0) / (dest_rows - 1.0);
+
+		var adj_2d = []; // matrix for storing adjacents
+		for (var y_idx=0; y_idx < dest_rows; y_idx++) {
+			for (var x_idx=0; x_idx < dest_cols; x_idx++) {
+				 var x = x_idx * mu_x;
+				 var y = y_idx * mu_y;
+				 get_adjacents_2d(src, adj_2d, src_rows, src_cols, x, y);
+				 var frac_x = x - Math.floor(x); // we only need the ~delta~ between the points
+				 var frac_y = y - Math.floor(y); // we only need the ~delta~ between the points
+				 var out = bicubicInterpolate(adj_2d, frac_x, frac_y);
+				 set_point(dest, dest_rows, dest_cols, x_idx, y_idx, out);
+			}
+		}
+	}	
+  </script>
  </body>
 </html>
